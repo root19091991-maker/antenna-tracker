@@ -1,0 +1,35 @@
+name: Build antenna tracker (ESP32)
+on:
+  workflow_dispatch:
+    inputs:
+      board:
+        description: "Плата ESP32"
+        type: choice
+        options:
+          - esp32
+          - esp32c3
+        default: esp32
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Compile
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
+          if [ "${{ inputs.board }}" = "esp32c3" ]; then
+            FQBN="esp32:esp32:esp32c3:CDCOnBoot=cdc"
+          else
+            FQBN="esp32:esp32:esp32"
+          fi
+          arduino-cli compile --fqbn "$FQBN" --output-dir out antenna_tracker_esp32
+          ls -l out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: antenna-tracker-firmware
+          path: out/*.merged.bin
