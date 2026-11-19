@@ -23,11 +23,15 @@
 #include <WiFiUdp.h>
 #include <ETH.h>
 #include <SPI.h>
+#include <WebServer.h>
 
 // ---------- Мережа ----------
-#define NET_MODE 0                 // 0 = Ethernet-модуль W5500, 1 = Wi-Fi (підключення до вашого роутера)
-const char* MY_WIFI_SSID = "antena_traker";        // потрібно тільки для NET_MODE 1
-const char* MY_WIFI_PASS = "Qwert12345";
+#define NET_MODE 2                 // 0 = Ethernet W5500, 1 = Wi-Fi клієнт (до вашого роутера), 2 = власна Wi-Fi мережа трекера
+const char* AP_SSID = "ANTENNA-TRACKER";      // NET_MODE 2: ім'я мережі, яку створює плата
+const char* AP_PASS = "Qwert12345)";             // NET_MODE 2: пароль (мінімум 8 символів)
+// У режимі 2: підключіться до цієї мережі, відкрийте http://192.168.4.1/ (ручне керування), UDP-команди на 192.168.4.1:5005
+const char* MY_WIFI_SSID = "ВАШ_WIFI";        // потрібно тільки для NET_MODE 1
+const char* MY_WIFI_PASS = "ВАШ_ПАРОЛЬ";
 IPAddress TRK_IP(192, 168, 1, 50);       // IP трекера (вільний у вашій мережі!)
 IPAddress TRK_GW(192, 168, 1, 1);         // адреса роутера
 IPAddress TRK_MASK(255, 255, 255, 0);
@@ -128,6 +132,8 @@ bool udpUp = false;
 bool netUp() {
 #if NET_MODE == 0
   return ETH.linkUp();
+#elif NET_MODE == 2
+  return true;
 #else
   return WiFi.status() == WL_CONNECTED;
 #endif
@@ -137,6 +143,9 @@ void netBegin() {
 #if NET_MODE == 0
   ETH.begin(ETH_PHY_W5500, 1, W5500_CS, W5500_INT, W5500_RST, SPI3_HOST, W5500_SCK, W5500_MISO, W5500_MOSI);
   ETH.config(TRK_IP, TRK_GW, TRK_MASK, TRK_DNS);
+#elif NET_MODE == 2
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(AP_SSID, AP_PASS);
 #else
   WiFi.mode(WIFI_STA);
   WiFi.config(TRK_IP, TRK_GW, TRK_MASK, TRK_DNS);
@@ -170,6 +179,24 @@ String handleLine(String s) {
   return "ERR unknown";
 }
 
+#if NET_MODE == 2
+WebServer web(80);
+const char PAGE[] PROGMEM =
+"<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'><title>Трекер</title>"
+"<body style='font-family:sans-serif;max-width:420px;margin:20px auto'><h2>Антена трекер</h2>"
+"<p>Азимут (град): <b id=a>0</b></p><input id=s type=range min=0 max=360 value=0 style='width:100%'>"
+"<p>Висота (град): <b id=e>0</b></p><input id=h type=range min=0 max=90 value=0 style='width:100%'>"
+"<p><button onclick=\"c('C')\">Центр</button></p><pre id=r></pre>"
+"<script>function c(x){fetch('/cmd?c='+encodeURIComponent(x)).then(r=>r.text()).then(t=>r.textContent=t)}"
+"function t(){a.textContent=s.value;e.textContent=h.value;c('T,'+s.value+','+h.value)}"
+"s.oninput=t;h.oninput=t;</script>";
+void webBegin() {
+  web.on("/", []() { web.send_P(200, "text/html; charset=utf-8", PAGE); });
+  web.on("/cmd", []() { web.send(200, "text/plain; charset=utf-8", handleLine(web.arg("c"))); });
+  web.begin();
+}
+#endif
+
 void setup() {
   Serial.begin(115200);
   pwmBegin();
@@ -178,11 +205,18 @@ void setup() {
   writeServo(PIN_TILT, curTilt, 180.0f);
 #endif
   netBegin();
+#if NET_MODE == 2
+  webBegin();
+  Serial.println(String("Wi-Fi: ") + AP_SSID + "  http://" + WiFi.softAPIP().toString() + "/");
+#endif
   Serial.println("Antenna tracker ready");
   lastStep = millis();
 }
 
 void loop() {
+#if NET_MODE == 2
+  web.handleClient();
+#endif
   while (Serial.available()) {
     char c = Serial.read();
     if (c == '\n') { String r = handleLine(line); if (r.length()) Serial.println(r); line = ""; }
