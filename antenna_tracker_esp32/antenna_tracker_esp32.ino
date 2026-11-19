@@ -7,7 +7,10 @@
 //   C           центр: pan=90, tilt=90
 //   ?           вивести стан
 //
-// Механіка (серво на 180°): "через верх". Pan 0..180 покриває півколо азимутів, а коли ціль
+// РЕЖИМИ: USE_TILT 0 = тільки поворот по осі на PAN_RANGE_DEG (напр. 270°, одне серво на 270°);
+//         USE_TILT 1 = pan + tilt на серво 180° (механіка нижче).
+//
+// Механіка для USE_TILT 1 (серво на 180°): "через верх". Pan 0..180 покриває півколо азимутів, а коли ціль
 // у протилежній півкулі, pan = az-180 і тильт перевертається (tilt = 180 - el).
 //   tilt 0   = антена дивиться горизонтально в бік pan
 //   tilt 90  = вертикально вгору
@@ -48,13 +51,15 @@ const int PIN_PAN  = 18;
 const int PIN_TILT = 19;
 #endif
 
+#define USE_TILT 0                  // 0 = тільки поворот по осі (без нахилу), 1 = pan + tilt
+const float PAN_RANGE_DEG = 270.0;  // повний хід pan-серво: 270 (серво на 270°) або 180 (звичайне серво)
 const float PAN_ZERO_AZ  = 0.0;     // азимут, у який дивиться антена при pan=0 (0 = північ, 90 = схід)
 const bool  PAN_REVERSE  = false;   // true, якщо pan крутиться у зворотний бік
 const bool  TILT_REVERSE = false;   // true, якщо тильт крутиться у зворотний бік
 const float PAN_TRIM     = 0.0;     // підгонка нуля pan, градуси
 const float TILT_TRIM    = 0.0;     // підгонка нуля tilt, градуси
 const int   SERVO_MIN_US = 500;     // імпульс для 0 градусів (залежить від серво: 500..1000)
-const int   SERVO_MAX_US = 2500;    // імпульс для 180 градусів (2000..2500)
+const int   SERVO_MAX_US = 2500;    // імпульс для повного ходу (PAN_RANGE_DEG): 2000..2500
 const float MAX_SPEED_DPS = 60.0;   // макс. швидкість серво, градусів/с (плавний рух)
 // -----------------------------------
 
@@ -65,21 +70,31 @@ const int PWM_RES  = 14;            // 16384 тіків на період 20000 
 #define ESP_ARDUINO_VERSION_MAJOR 2
 #endif
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
-void pwmBegin()                 { ledcAttach(PIN_PAN, PWM_FREQ, PWM_RES); ledcAttach(PIN_TILT, PWM_FREQ, PWM_RES); }
+void pwmBegin() {
+  ledcAttach(PIN_PAN, PWM_FREQ, PWM_RES);
+#if USE_TILT
+  ledcAttach(PIN_TILT, PWM_FREQ, PWM_RES);
+#endif
+}
 void pwmDuty(int pin, uint32_t d) { ledcWrite(pin, d); }
 #else
-void pwmBegin()                 { ledcSetup(0, PWM_FREQ, PWM_RES); ledcAttachPin(PIN_PAN, 0); ledcSetup(1, PWM_FREQ, PWM_RES); ledcAttachPin(PIN_TILT, 1); }
+void pwmBegin() {
+  ledcSetup(0, PWM_FREQ, PWM_RES); ledcAttachPin(PIN_PAN, 0);
+#if USE_TILT
+  ledcSetup(1, PWM_FREQ, PWM_RES); ledcAttachPin(PIN_TILT, 1);
+#endif
+}
 void pwmDuty(int pin, uint32_t d) { ledcWrite(pin == PIN_PAN ? 0 : 1, d); }
 #endif
 
-float curPan = 90, curTilt = 90;      // текуче положення, градуси
-float tgtPan = 90, tgtTilt = 90;      // ціль, градуси
+float curPan = PAN_RANGE_DEG / 2, curTilt = 90;      // текуче положення, градуси
+float tgtPan = PAN_RANGE_DEG / 2, tgtTilt = 90;      // ціль, градуси
 String line;
 unsigned long lastStep = 0;
 
-void writeServo(int pin, float deg) {
-  deg = constrain(deg, 0.0f, 180.0f);
-  float us = SERVO_MIN_US + (SERVO_MAX_US - SERVO_MIN_US) * deg / 180.0f;
+void writeServo(int pin, float deg, float range) {
+  deg = constrain(deg, 0.0f, range);
+  float us = SERVO_MIN_US + (SERVO_MAX_US - SERVO_MIN_US) * deg / range;
   pwmDuty(pin, (uint32_t)(us * 16384.0f / 20000.0f));
 }
 
@@ -88,12 +103,23 @@ void aimToServos(float az, float el, float &pan, float &tilt) {
   el = constrain(el, 0.0f, 90.0f);
   float rel = fmodf(az - PAN_ZERO_AZ, 360.0f);
   if (rel < 0) rel += 360.0f;
+#if USE_TILT
+  // pan + tilt на звичайних серво 180°: "через верх"
   if (rel <= 180.0f) { pan = rel;          tilt = el; }
   else               { pan = rel - 180.0f; tilt = 180.0f - el; }
   if (PAN_REVERSE)  pan  = 180.0f - pan;
   if (TILT_REVERSE) tilt = 180.0f - tilt;
   pan  = constrain(pan + PAN_TRIM, 0.0f, 180.0f);
   tilt = constrain(tilt + TILT_TRIM, 0.0f, 180.0f);
+#else
+  // тільки поворот по осі на PAN_RANGE_DEG (напр. 270°). Якщо азимут у "мертвій зоні",
+  // антена стає на найближчий край діапазону.
+  if (rel <= PAN_RANGE_DEG) pan = rel;
+  else pan = ((rel - PAN_RANGE_DEG) < (360.0f - rel)) ? PAN_RANGE_DEG : 0.0f;
+  if (PAN_REVERSE) pan = PAN_RANGE_DEG - pan;
+  pan = constrain(pan + PAN_TRIM, 0.0f, PAN_RANGE_DEG);
+  tilt = 90;
+#endif
 }
 
 WiFiUDP udp;
@@ -131,11 +157,11 @@ String handleLine(String s) {
     float a = s.substring(c1 + 1, c2).toFloat();
     float b = s.substring(c2 + 1).toFloat();
     if (cmd == 'T') aimToServos(a, b, tgtPan, tgtTilt);
-    else { tgtPan = constrain(a, 0.0f, 180.0f); tgtTilt = constrain(b, 0.0f, 180.0f); }
+    else { tgtPan = constrain(a, 0.0f, PAN_RANGE_DEG); tgtTilt = constrain(b, 0.0f, 180.0f); }
     snprintf(buf, sizeof(buf), "OK pan=%.1f tilt=%.1f", tgtPan, tgtTilt);
     return String(buf);
   } else if (cmd == 'C') {
-    tgtPan = 90; tgtTilt = 90;
+    tgtPan = PAN_RANGE_DEG / 2; tgtTilt = 90;
     return "OK center";
   } else if (cmd == '?') {
     snprintf(buf, sizeof(buf), "pan=%.1f->%.1f tilt=%.1f->%.1f net=%s", curPan, tgtPan, curTilt, tgtTilt, netUp() ? "up" : "down");
@@ -147,8 +173,10 @@ String handleLine(String s) {
 void setup() {
   Serial.begin(115200);
   pwmBegin();
-  writeServo(PIN_PAN, curPan);
-  writeServo(PIN_TILT, curTilt);
+  writeServo(PIN_PAN, curPan, PAN_RANGE_DEG);
+#if USE_TILT
+  writeServo(PIN_TILT, curTilt, 180.0f);
+#endif
   netBegin();
   Serial.println("Antenna tracker ready");
   lastStep = millis();
@@ -192,7 +220,9 @@ void loop() {
     float dt2 = tgtTilt - curTilt;
     curPan  += constrain(dp,  -maxStep, maxStep);
     curTilt += constrain(dt2, -maxStep, maxStep);
-    writeServo(PIN_PAN, curPan);
-    writeServo(PIN_TILT, curTilt);
+    writeServo(PIN_PAN, curPan, PAN_RANGE_DEG);
+#if USE_TILT
+    writeServo(PIN_TILT, curTilt, 180.0f);
+#endif
   }
 }
