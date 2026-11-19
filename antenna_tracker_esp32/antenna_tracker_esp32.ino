@@ -28,7 +28,7 @@
 // ---------- Мережа ----------
 #define NET_MODE 2                 // 0 = Ethernet W5500, 1 = Wi-Fi клієнт (до вашого роутера), 2 = власна Wi-Fi мережа трекера
 const char* AP_SSID = "ANTENNA-TRACKER";      // NET_MODE 2: ім'я мережі, яку створює плата
-const char* AP_PASS = "Qwert12345)";             // NET_MODE 2: пароль (мінімум 8 символів)
+const char* AP_PASS = "Qwert12345";             // NET_MODE 2: пароль (мінімум 8 символів)
 // У режимі 2: підключіться до цієї мережі, відкрийте http://192.168.4.1/ (ручне керування), UDP-команди на 192.168.4.1:5005
 const char* MY_WIFI_SSID = "ВАШ_WIFI";        // потрібно тільки для NET_MODE 1
 const char* MY_WIFI_PASS = "ВАШ_ПАРОЛЬ";
@@ -144,8 +144,19 @@ void netBegin() {
   ETH.begin(ETH_PHY_W5500, 1, W5500_CS, W5500_INT, W5500_RST, SPI3_HOST, W5500_SCK, W5500_MISO, W5500_MOSI);
   ETH.config(TRK_IP, TRK_GW, TRK_MASK, TRK_DNS);
 #elif NET_MODE == 2
+  WiFi.persistent(false);
+  WiFi.disconnect(true, true);
+  delay(100);
   WiFi.mode(WIFI_AP);
-  WiFi.softAP(AP_SSID, AP_PASS);
+  delay(100);
+  WiFi.softAPConfig(IPAddress(192,168,4,1), IPAddress(192,168,4,1), IPAddress(255,255,255,0));
+  bool ok = false;
+  for (int i = 0; i < 5 && !ok; i++) {            // кілька спроб, канал 1, видима мережа, до 4 клієнтів
+    ok = WiFi.softAP(AP_SSID, AP_PASS, 1, 0, 4);
+    if (!ok) { Serial.println("softAP FAIL, retry"); delay(300); }
+  }
+  WiFi.setTxPower(WIFI_POWER_8_5dBm);             // менше струму = менше просідань живлення
+  Serial.println(ok ? "softAP OK" : "softAP ERROR");
 #else
   WiFi.mode(WIFI_STA);
   WiFi.config(TRK_IP, TRK_GW, TRK_MASK, TRK_DNS);
@@ -199,12 +210,13 @@ void webBegin() {
 
 void setup() {
   Serial.begin(115200);
+  delay(300);
+  netBegin();                      // Wi-Fi стартує першим, до серво
   pwmBegin();
   writeServo(PIN_PAN, curPan, PAN_RANGE_DEG);
 #if USE_TILT
   writeServo(PIN_TILT, curTilt, 180.0f);
 #endif
-  netBegin();
 #if NET_MODE == 2
   webBegin();
   Serial.println(String("Wi-Fi: ") + AP_SSID + "  http://" + WiFi.softAPIP().toString() + "/");
