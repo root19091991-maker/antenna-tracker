@@ -26,8 +26,8 @@
 
 // ---------- Мережа ----------
 #define NET_MODE 0                 // 0 = Ethernet-модуль W5500, 1 = Wi-Fi (підключення до вашого роутера)
-const char* MY_WIFI_SSID = "ВАШ_WIFI";        // потрібно тільки для NET_MODE 1
-const char* MY_WIFI_PASS = "ВАШ_ПАРОЛЬ";
+const char* MY_WIFI_SSID = "antena_traker";        // потрібно тільки для NET_MODE 1
+const char* MY_WIFI_PASS = "Qwert12345";
 IPAddress TRK_IP(192, 168, 1, 50);       // IP трекера (вільний у вашій мережі!)
 IPAddress TRK_GW(192, 168, 1, 1);         // адреса роутера
 IPAddress TRK_MASK(255, 255, 255, 0);
