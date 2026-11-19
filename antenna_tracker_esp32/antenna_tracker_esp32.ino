@@ -1,6 +1,7 @@
-// ESP32: поворотна платформа антени (пан + тильт, 2 серво). Команди з ПК по USB-serial.
+// ESP32: поворотна платформа антени (пан + тильт, 2 серво).
+// Команди з ПК: по USB-serial (115200) І по мережі UDP (Ethernet W5500 або Wi-Fi).
 //
-// Протокол (115200, рядки закінчуються \n):
+// Протокол (рядки закінчуються \n, по UDP можна і без \n):
 //   T,az,el     азимут 0..360 (0 = північ), кут місця 0..90  -> антена наводиться
 //   P,pan,tilt  прямі кути серво 0..180 (для калібрування)
 //   C           центр: pan=90, tilt=90
@@ -14,6 +15,29 @@
 //
 // Підключення: сигнал pan -> PIN_PAN, тильт -> PIN_TILT, GND серво -> GND ESP32.
 // Серво живіть ОКРЕМО від 5 В (не від ESP32!), мінус спільний з ESP32.
+
+#include <WiFi.h>
+#include <WiFiUdp.h>
+#include <ETH.h>
+#include <SPI.h>
+
+// ---------- Мережа ----------
+#define NET_MODE 0                 // 0 = Ethernet-модуль W5500, 1 = Wi-Fi (підключення до вашого роутера)
+const char* MY_WIFI_SSID = "ВАШ_WIFI";        // потрібно тільки для NET_MODE 1
+const char* MY_WIFI_PASS = "ВАШ_ПАРОЛЬ";
+IPAddress TRK_IP(192, 168, 1, 50);       // IP трекера (вільний у вашій мережі!)
+IPAddress TRK_GW(192, 168, 1, 1);         // адреса роутера
+IPAddress TRK_MASK(255, 255, 255, 0);
+IPAddress TRK_DNS(192, 168, 1, 1);
+const uint16_t CMD_PORT = 5005;            // порт команд
+
+// Піни модуля W5500 (SPI). Живлення модуля тільки 3.3 В!
+const int W5500_SCK  = 25;
+const int W5500_MISO = 26;
+const int W5500_MOSI = 27;
+const int W5500_CS   = 32;
+const int W5500_INT  = 33;
+const int W5500_RST  = 4;
 
 // ---------- Налаштування ----------
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
@@ -72,27 +96,52 @@ void aimToServos(float az, float el, float &pan, float &tilt) {
   tilt = constrain(tilt + TILT_TRIM, 0.0f, 180.0f);
 }
 
-void handleLine(String s) {
+WiFiUDP udp;
+bool udpUp = false;
+
+bool netUp() {
+#if NET_MODE == 0
+  return ETH.linkUp();
+#else
+  return WiFi.status() == WL_CONNECTED;
+#endif
+}
+
+void netBegin() {
+#if NET_MODE == 0
+  ETH.begin(ETH_PHY_W5500, 1, W5500_CS, W5500_INT, W5500_RST, SPI3_HOST, W5500_SCK, W5500_MISO, W5500_MOSI);
+  ETH.config(TRK_IP, TRK_GW, TRK_MASK, TRK_DNS);
+#else
+  WiFi.mode(WIFI_STA);
+  WiFi.config(TRK_IP, TRK_GW, TRK_MASK, TRK_DNS);
+  WiFi.begin(MY_WIFI_SSID, MY_WIFI_PASS);
+#endif
+}
+
+// Обробляє один рядок команди, повертає відповідь
+String handleLine(String s) {
   s.trim();
-  if (s.length() == 0) return;
+  if (s.length() == 0) return "";
+  char buf[96];
   char cmd = s[0];
   if (cmd == 'T' || cmd == 'P') {
     int c1 = s.indexOf(',');
     int c2 = s.indexOf(',', c1 + 1);
-    if (c1 < 0 || c2 < 0) { Serial.println("ERR format"); return; }
+    if (c1 < 0 || c2 < 0) return "ERR format";
     float a = s.substring(c1 + 1, c2).toFloat();
     float b = s.substring(c2 + 1).toFloat();
     if (cmd == 'T') aimToServos(a, b, tgtPan, tgtTilt);
     else { tgtPan = constrain(a, 0.0f, 180.0f); tgtTilt = constrain(b, 0.0f, 180.0f); }
-    Serial.printf("OK pan=%.1f tilt=%.1f\n", tgtPan, tgtTilt);
+    snprintf(buf, sizeof(buf), "OK pan=%.1f tilt=%.1f", tgtPan, tgtTilt);
+    return String(buf);
   } else if (cmd == 'C') {
     tgtPan = 90; tgtTilt = 90;
-    Serial.println("OK center");
+    return "OK center";
   } else if (cmd == '?') {
-    Serial.printf("pan=%.1f->%.1f tilt=%.1f->%.1f\n", curPan, tgtPan, curTilt, tgtTilt);
-  } else {
-    Serial.println("ERR unknown");
+    snprintf(buf, sizeof(buf), "pan=%.1f->%.1f tilt=%.1f->%.1f net=%s", curPan, tgtPan, curTilt, tgtTilt, netUp() ? "up" : "down");
+    return String(buf);
   }
+  return "ERR unknown";
 }
 
 void setup() {
@@ -100,6 +149,7 @@ void setup() {
   pwmBegin();
   writeServo(PIN_PAN, curPan);
   writeServo(PIN_TILT, curTilt);
+  netBegin();
   Serial.println("Antenna tracker ready");
   lastStep = millis();
 }
@@ -107,8 +157,30 @@ void setup() {
 void loop() {
   while (Serial.available()) {
     char c = Serial.read();
-    if (c == '\n') { handleLine(line); line = ""; }
+    if (c == '\n') { String r = handleLine(line); if (r.length()) Serial.println(r); line = ""; }
     else if (c != '\r' && line.length() < 64) line += c;
+  }
+
+  // UDP-команди по мережі
+  if (!udpUp && netUp()) {
+    udp.begin(CMD_PORT);
+    udpUp = true;
+    Serial.printf("UDP listening on %s:%u\n", TRK_IP.toString().c_str(), CMD_PORT);
+  }
+  if (udpUp) {
+    int n = udp.parsePacket();
+    if (n > 0) {
+      char pkt[96];
+      int len = udp.read(pkt, sizeof(pkt) - 1);
+      if (len < 0) len = 0;
+      pkt[len] = 0;
+      String r = handleLine(String(pkt));
+      if (r.length()) {
+        udp.beginPacket(udp.remoteIP(), udp.remotePort());
+        udp.print(r + "\n");
+        udp.endPacket();
+      }
+    }
   }
 
   unsigned long now = millis();
